@@ -2,9 +2,11 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
+    # Host networking so Caddy can reach services bound to the host's own
+    # 127.0.0.1 (e.g. containers publishing a port via `docker run -p`),
+    # not just other containers on a shared Docker network. This also means
+    # Caddy binds 80/443 directly on the host, so no `ports:` mapping here.
+    network_mode: host
     # The whole project root is mounted read-only at /srv so that both the
     # live Caddyfile and a candidate Caddyfile.new (used by `proxyctl validate`)
     # are visible inside the container without changing this file per deploy.
