@@ -11,8 +11,10 @@ docker compose up -d
 go build -o bin/proxyctl ./cmd/proxyctl
 ```
 
-Run everything below from the project root (same directory as
-`docker-compose.yml`).
+`proxyctl` must be built to `bin/proxyctl` under the project root, exactly as
+above -- at startup it resolves the project root from its own binary path
+(parent of the `bin/` directory it lives in), so it works correctly even when
+invoked from another directory or with `bin/` added to `PATH`.
 
 ## Usage
 

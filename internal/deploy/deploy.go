@@ -1,32 +1,32 @@
 // Package deploy writes the generated Caddyfile to disk and drives the
 // running Caddy container (via `docker compose exec`) to validate and
-// reload it. It assumes the current working directory is the project
-// root, matching the docker-compose.yml volume mount of "." to "/srv"
-// inside the container.
+// reload it. Every function takes the absolute project root explicitly,
+// so behavior does not depend on the caller's current working directory.
 package deploy
 
 import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 )
 
 const (
-	CaddyfilePath    = "Caddyfile"
-	CaddyfileNewPath = "Caddyfile.new"
-	CaddyfileBakPath = "Caddyfile.bak"
+	CaddyfileName    = "Caddyfile"
+	CaddyfileNewName = "Caddyfile.new"
+	CaddyfileBakName = "Caddyfile.bak"
 
 	containerService = "caddy"
 	containerRoot    = "/srv"
 )
 
-// WriteNewCaddyfile atomically writes content to Caddyfile.new.
-func WriteNewCaddyfile(content string) error {
-	return atomicWrite(CaddyfileNewPath, content)
+// WriteNewCaddyfile atomically writes content to <root>/Caddyfile.new.
+func WriteNewCaddyfile(root, content string) error {
+	return atomicWrite(root, filepath.Join(root, CaddyfileNewName), content)
 }
 
-func atomicWrite(path, content string) error {
-	tmp, err := os.CreateTemp(".", ".caddyfile-*.tmp")
+func atomicWrite(root, path, content string) error {
+	tmp, err := os.CreateTemp(root, ".caddyfile-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -46,12 +46,15 @@ func atomicWrite(path, content string) error {
 	return nil
 }
 
-// Validate runs `caddy validate` inside the running container against relPath
-// (a file under the project root, visible inside the container at /srv/relPath).
-// It does not modify the live Caddyfile.
-func Validate(relPath string) error {
+// Validate runs `caddy validate` inside the running container against
+// <root>/Caddyfile.new (visible inside the container at /srv/Caddyfile.new,
+// since docker-compose.yml mounts root at /srv). It does not modify the
+// live Caddyfile. The docker compose command is run with root as its
+// working directory so it finds the right docker-compose.yml.
+func Validate(root string) error {
 	cmd := exec.Command("docker", "compose", "exec", "-T", containerService,
-		"caddy", "validate", "--config", containerRoot+"/"+relPath, "--adapter", "caddyfile")
+		"caddy", "validate", "--config", containerRoot+"/"+CaddyfileNewName, "--adapter", "caddyfile")
+	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("caddy validate failed: %w\n%s", err, out)
@@ -62,21 +65,26 @@ func Validate(relPath string) error {
 // Reload backs up the live Caddyfile to Caddyfile.bak, promotes Caddyfile.new
 // to Caddyfile, and tells the running container to reload with zero downtime.
 // The caller is expected to have already validated Caddyfile.new.
-func Reload() error {
-	if data, err := os.ReadFile(CaddyfilePath); err == nil {
-		if err := atomicWrite(CaddyfileBakPath, string(data)); err != nil {
+func Reload(root string) error {
+	caddyfilePath := filepath.Join(root, CaddyfileName)
+	newPath := filepath.Join(root, CaddyfileNewName)
+	bakPath := filepath.Join(root, CaddyfileBakName)
+
+	if data, err := os.ReadFile(caddyfilePath); err == nil {
+		if err := atomicWrite(root, bakPath, string(data)); err != nil {
 			return fmt.Errorf("backup current Caddyfile: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("read current Caddyfile: %w", err)
 	}
 
-	if err := os.Rename(CaddyfileNewPath, CaddyfilePath); err != nil {
+	if err := os.Rename(newPath, caddyfilePath); err != nil {
 		return fmt.Errorf("promote Caddyfile.new: %w", err)
 	}
 
 	cmd := exec.Command("docker", "compose", "exec", "-T", containerService,
-		"caddy", "reload", "--config", containerRoot+"/"+CaddyfilePath, "--adapter", "caddyfile")
+		"caddy", "reload", "--config", containerRoot+"/"+CaddyfileName, "--adapter", "caddyfile")
+	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("caddy reload failed: %w\n%s", err, out)

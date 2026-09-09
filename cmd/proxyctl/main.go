@@ -1,11 +1,15 @@
 // Command proxyctl manages the proxied hostnames declared in routes.yaml
 // and drives Caddy (running in Docker Compose) to apply them.
-// It must be run from the project root, alongside routes.yaml and docker-compose.yml.
+//
+// It can be invoked from any working directory (e.g. with its bin/
+// directory added to PATH): the project root is always resolved from the
+// location of the binary itself, which must live at <project_root>/bin/proxyctl.
 package main
 
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 
 	"private-proxy/internal/caddyfile"
@@ -13,9 +17,15 @@ import (
 	"private-proxy/internal/routes"
 )
 
-const routesPath = "routes.yaml"
+const routesFileName = "routes.yaml"
 
 func main() {
+	root, err := projectRoot()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(1)
@@ -24,24 +34,23 @@ func main() {
 	cmd := os.Args[1]
 	args := os.Args[2:]
 
-	var err error
 	switch cmd {
 	case "add":
-		err = runAdd(args)
+		err = runAdd(root, args)
 	case "remove":
-		err = runRemove(args)
+		err = runRemove(root, args)
 	case "edit":
-		err = runEdit(args)
+		err = runEdit(root, args)
 	case "enable":
-		err = runSetEnabled(args, true)
+		err = runSetEnabled(root, args, true)
 	case "disable":
-		err = runSetEnabled(args, false)
+		err = runSetEnabled(root, args, false)
 	case "list":
-		err = runList(args)
+		err = runList(root, args)
 	case "validate":
-		err = runValidate(args)
+		err = runValidate(root, args)
 	case "apply":
-		err = runApply(args)
+		err = runApply(root, args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -55,6 +64,26 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// projectRoot resolves the project root from the location of the running
+// binary, so proxyctl behaves the same regardless of the caller's current
+// working directory. The binary is expected to live at <project_root>/bin/proxyctl.
+func projectRoot() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate proxyctl executable: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", fmt.Errorf("resolve proxyctl executable path: %w", err)
+	}
+
+	binDir := filepath.Dir(exe)
+	if filepath.Base(binDir) == "bin" {
+		return filepath.Dir(binDir), nil
+	}
+	return binDir, nil
 }
 
 func usage() {
@@ -74,10 +103,11 @@ Commands other than "apply" only edit routes.yaml; run "apply" to deploy the cha
 `)
 }
 
-func runAdd(args []string) error {
+func runAdd(root string, args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("usage: proxyctl add <hostname> <ip:port>")
 	}
+	routesPath := filepath.Join(root, routesFileName)
 	s, err := routes.Load(routesPath)
 	if err != nil {
 		return err
@@ -92,10 +122,11 @@ func runAdd(args []string) error {
 	return nil
 }
 
-func runRemove(args []string) error {
+func runRemove(root string, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("usage: proxyctl remove <hostname>")
 	}
+	routesPath := filepath.Join(root, routesFileName)
 	s, err := routes.Load(routesPath)
 	if err != nil {
 		return err
@@ -110,10 +141,11 @@ func runRemove(args []string) error {
 	return nil
 }
 
-func runEdit(args []string) error {
+func runEdit(root string, args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("usage: proxyctl edit <hostname> <ip:port>")
 	}
+	routesPath := filepath.Join(root, routesFileName)
 	s, err := routes.Load(routesPath)
 	if err != nil {
 		return err
@@ -128,7 +160,7 @@ func runEdit(args []string) error {
 	return nil
 }
 
-func runSetEnabled(args []string, enabled bool) error {
+func runSetEnabled(root string, args []string, enabled bool) error {
 	if len(args) != 1 {
 		verb := "enable"
 		if !enabled {
@@ -136,6 +168,7 @@ func runSetEnabled(args []string, enabled bool) error {
 		}
 		return fmt.Errorf("usage: proxyctl %s <hostname>", verb)
 	}
+	routesPath := filepath.Join(root, routesFileName)
 	s, err := routes.Load(routesPath)
 	if err != nil {
 		return err
@@ -154,10 +187,11 @@ func runSetEnabled(args []string, enabled bool) error {
 	return nil
 }
 
-func runList(args []string) error {
+func runList(root string, args []string) error {
 	if len(args) != 0 {
 		return fmt.Errorf("usage: proxyctl list")
 	}
+	routesPath := filepath.Join(root, routesFileName)
 	s, err := routes.Load(routesPath)
 	if err != nil {
 		return err
@@ -179,10 +213,11 @@ func runList(args []string) error {
 	return w.Flush()
 }
 
-func runValidate(args []string) error {
+func runValidate(root string, args []string) error {
 	if len(args) != 0 {
 		return fmt.Errorf("usage: proxyctl validate")
 	}
+	routesPath := filepath.Join(root, routesFileName)
 	s, err := routes.Load(routesPath)
 	if err != nil {
 		return err
@@ -191,24 +226,24 @@ func runValidate(args []string) error {
 	if err != nil {
 		return fmt.Errorf("render Caddyfile: %w", err)
 	}
-	if err := deploy.WriteNewCaddyfile(content); err != nil {
+	if err := deploy.WriteNewCaddyfile(root, content); err != nil {
 		return err
 	}
-	if err := deploy.Validate(deploy.CaddyfileNewPath); err != nil {
+	if err := deploy.Validate(root); err != nil {
 		return err
 	}
 	fmt.Println("Caddyfile is valid")
 	return nil
 }
 
-func runApply(args []string) error {
+func runApply(root string, args []string) error {
 	if len(args) != 0 {
 		return fmt.Errorf("usage: proxyctl apply")
 	}
-	if err := runValidate(nil); err != nil {
+	if err := runValidate(root, nil); err != nil {
 		return err
 	}
-	if err := deploy.Reload(); err != nil {
+	if err := deploy.Reload(root); err != nil {
 		return err
 	}
 	fmt.Println("applied and reloaded Caddy")
