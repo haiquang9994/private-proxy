@@ -1,0 +1,4 @@
+# Source of truth for proxied hostnames.
+# Managed via the proxyctl CLI (add/remove/edit/enable/disable/list).
+# Run "proxyctl apply" after editing to regenerate the Caddyfile and reload Caddy.
+routes: []
