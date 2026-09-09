@@ -9,7 +9,12 @@ import (
 )
 
 const tpl = `{{range .}}{{.Hostname}} {
-    reverse_proxy {{.Upstream}}
+    reverse_proxy {{.Upstream}} {
+        transport http {
+            keepalive 2m
+            keepalive_idle_conns 10
+        }
+    }
 }
 {{end}}`
 
