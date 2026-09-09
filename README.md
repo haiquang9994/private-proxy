@@ -16,6 +16,30 @@ above -- at startup it resolves the project root from its own binary path
 (parent of the `bin/` directory it lives in), so it works correctly even when
 invoked from another directory or with `bin/` added to `PATH`.
 
+## Building locally and deploying to the server
+
+The server runs Linux, so if you build on a different OS you need to
+cross-compile. Run this from the project root.
+
+macOS/Linux (bash/zsh):
+
+```sh
+GOOS=linux GOARCH=amd64 go build -o bin/proxyctl ./cmd/proxyctl
+scp bin/proxyctl user@server:/opt/private-proxy/bin/proxyctl
+```
+
+Windows (PowerShell):
+
+```powershell
+$env:GOOS = "linux"; $env:GOARCH = "amd64"
+go build -o bin/proxyctl .\cmd\proxyctl
+scp bin/proxyctl user@server:/opt/private-proxy/bin/proxyctl
+```
+
+If you're building directly on the server (Linux on Linux), a plain
+`go build -o bin/proxyctl ./cmd/proxyctl` is enough -- no `GOOS`/`GOARCH`
+needed.
+
 ## Usage
 
 ```
