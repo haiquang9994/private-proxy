@@ -43,14 +43,14 @@ needed.
 ## Usage
 
 ```
-proxyctl add <hostname> <ip:port>      Add a new hostname -> upstream route
-proxyctl remove <hostname>             Remove a route
-proxyctl edit <hostname> <ip:port>     Change the upstream of an existing route
-proxyctl enable <hostname>             Re-enable a disabled route
-proxyctl disable <hostname>            Disable a route without deleting it
-proxyctl list                          List all routes and their status
-proxyctl validate                      Render and validate the Caddyfile, without applying it
-proxyctl apply                         Validate, then apply and reload Caddy
+proxyctl add <hostname>[/path] <ip:port>      Add a new route -> upstream
+proxyctl remove <hostname>[/path]             Remove a route
+proxyctl edit <hostname>[/path] <ip:port>     Change the upstream of an existing route
+proxyctl enable <hostname>[/path]             Re-enable a disabled route
+proxyctl disable <hostname>[/path]            Disable a route without deleting it
+proxyctl list                                 List all routes and their status
+proxyctl validate                             Render and validate the Caddyfile, without applying it
+proxyctl apply                                Validate, then apply and reload Caddy
 ```
 
 `add`, `remove`, `edit`, `enable`, and `disable` only edit `routes.yaml`.
@@ -59,9 +59,24 @@ Caddyfile, validates it inside the running container, backs up the previous
 Caddyfile to `Caddyfile.bak`, and reloads Caddy with zero downtime. If
 validation fails, the live Caddyfile is left untouched.
 
+A route can optionally be scoped to a path: `example.com` is the catch-all
+for that hostname, while `example.com/ws` only matches `/ws` and everything
+under it (e.g. `/ws/socket`), leaving the rest of the hostname's traffic to
+its catch-all route. Routes on the same hostname are independent: `remove`,
+`enable`, and `disable` on `example.com` only affect that hostname's
+catch-all route, not its path routes.
+
 ## Example
 
 ```
 proxyctl add app.example.com 10.0.0.5:8080
+proxyctl apply
+```
+
+## Example: path-based routing
+
+```
+proxyctl add example.com 10.10.10.1:8080
+proxyctl add example.com/ws 10.10.10.1:6001
 proxyctl apply
 ```

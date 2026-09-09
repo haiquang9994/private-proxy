@@ -15,9 +15,16 @@ import (
 
 var hostnameRE = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
 
-// Route is a single hostname -> upstream mapping.
+// pathRE matches a non-root URL path: a leading slash followed by one or
+// more non-empty segments, e.g. "/ws" or "/api/v2/ws". No trailing slash,
+// no empty segments.
+var pathRE = regexp.MustCompile(`^/[a-zA-Z0-9._~-]+(/[a-zA-Z0-9._~-]+)*$`)
+
+// Route is a single hostname[+path] -> upstream mapping. An empty Path
+// means the route is the catch-all for its hostname.
 type Route struct {
 	Hostname string `yaml:"hostname"`
+	Path     string `yaml:"path,omitempty"`
 	Upstream string `yaml:"upstream"`
 	Enabled  bool   `yaml:"enabled"`
 }
@@ -72,61 +79,69 @@ func Save(path string, s *Store) error {
 	return nil
 }
 
-// Find returns the route with the given hostname, if present.
-func (s *Store) Find(hostname string) (*Route, bool) {
+// displayName formats a hostname+path pair the way it's identified on the CLI.
+func displayName(hostname, path string) string {
+	return hostname + path
+}
+
+// Find returns the route with the given hostname and path, if present.
+func (s *Store) Find(hostname, path string) (*Route, bool) {
 	for i := range s.Routes {
-		if s.Routes[i].Hostname == hostname {
+		if s.Routes[i].Hostname == hostname && s.Routes[i].Path == path {
 			return &s.Routes[i], true
 		}
 	}
 	return nil, false
 }
 
-// Add appends a new route. It fails if the hostname or upstream is invalid,
-// or if the hostname already exists.
-func (s *Store) Add(hostname, upstream string) error {
+// Add appends a new route. It fails if the hostname, path, or upstream is
+// invalid, or if the (hostname, path) pair already exists.
+func (s *Store) Add(hostname, path, upstream string) error {
 	if err := ValidateHostname(hostname); err != nil {
+		return err
+	}
+	if err := ValidatePath(path); err != nil {
 		return err
 	}
 	if err := ValidateUpstream(upstream); err != nil {
 		return err
 	}
-	if _, ok := s.Find(hostname); ok {
-		return fmt.Errorf("hostname %q already exists", hostname)
+	if _, ok := s.Find(hostname, path); ok {
+		return fmt.Errorf("route %q already exists", displayName(hostname, path))
 	}
-	s.Routes = append(s.Routes, Route{Hostname: hostname, Upstream: upstream, Enabled: true})
+	s.Routes = append(s.Routes, Route{Hostname: hostname, Path: path, Upstream: upstream, Enabled: true})
 	return nil
 }
 
-// Remove deletes the route with the given hostname. It fails if not found.
-func (s *Store) Remove(hostname string) error {
+// Remove deletes the route with the given hostname and path. It fails if not found.
+func (s *Store) Remove(hostname, path string) error {
 	for i := range s.Routes {
-		if s.Routes[i].Hostname == hostname {
+		if s.Routes[i].Hostname == hostname && s.Routes[i].Path == path {
 			s.Routes = append(s.Routes[:i], s.Routes[i+1:]...)
 			return nil
 		}
 	}
-	return fmt.Errorf("hostname %q not found", hostname)
+	return fmt.Errorf("route %q not found", displayName(hostname, path))
 }
 
 // Edit updates the upstream of an existing route. It fails if not found or upstream is invalid.
-func (s *Store) Edit(hostname, upstream string) error {
+func (s *Store) Edit(hostname, path, upstream string) error {
 	if err := ValidateUpstream(upstream); err != nil {
 		return err
 	}
-	r, ok := s.Find(hostname)
+	r, ok := s.Find(hostname, path)
 	if !ok {
-		return fmt.Errorf("hostname %q not found", hostname)
+		return fmt.Errorf("route %q not found", displayName(hostname, path))
 	}
 	r.Upstream = upstream
 	return nil
 }
 
 // SetEnabled toggles whether a route is active. It fails if not found.
-func (s *Store) SetEnabled(hostname string, enabled bool) error {
-	r, ok := s.Find(hostname)
+func (s *Store) SetEnabled(hostname, path string, enabled bool) error {
+	r, ok := s.Find(hostname, path)
 	if !ok {
-		return fmt.Errorf("hostname %q not found", hostname)
+		return fmt.Errorf("route %q not found", displayName(hostname, path))
 	}
 	r.Enabled = enabled
 	return nil
@@ -136,6 +151,18 @@ func (s *Store) SetEnabled(hostname string, enabled bool) error {
 func ValidateHostname(hostname string) error {
 	if hostname == "" || !hostnameRE.MatchString(hostname) {
 		return fmt.Errorf("invalid hostname %q", hostname)
+	}
+	return nil
+}
+
+// ValidatePath reports whether path is a syntactically valid route path.
+// An empty path is valid and denotes the catch-all route for a hostname.
+func ValidatePath(path string) error {
+	if path == "" {
+		return nil
+	}
+	if !pathRE.MatchString(path) {
+		return fmt.Errorf("invalid path %q: must start with \"/\", contain no empty segments, and have no trailing slash", path)
 	}
 	return nil
 }

@@ -2,6 +2,8 @@
 package caddyfile
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 	"text/template"
 
@@ -9,30 +11,85 @@ import (
 )
 
 const tpl = `{{range .}}{{.Hostname}} {
-    reverse_proxy {{.Upstream}} {
-        transport http {
+{{range .Routes}}{{if .MatcherName}}    {{.MatcherName}} path {{.Path}} {{.Path}}/*
+    reverse_proxy {{.MatcherName}} {{.Upstream}} {
+{{else}}    reverse_proxy {{.Upstream}} {
+{{end}}        transport http {
             keepalive 2m
             keepalive_idle_conns 10
         }
     }
-}
+{{end}}}
 {{end}}`
 
 var parsedTpl = template.Must(template.New("caddyfile").Parse(tpl))
 
+// renderRoute is a single reverse_proxy entry within a host block.
+// MatcherName is empty for the catch-all route (no path).
+type renderRoute struct {
+	MatcherName string
+	Path        string
+	Upstream    string
+}
+
+// renderHost groups the routes for one hostname into a single Caddy site block.
+type renderHost struct {
+	Hostname string
+	Routes   []renderRoute
+}
+
 // Render generates Caddyfile contents for all enabled routes in s.
-// Disabled routes are skipped entirely.
+// Disabled routes are skipped entirely. Routes sharing a hostname are
+// grouped into one site block, with path-scoped routes ordered before the
+// catch-all and more specific (deeper) paths before shallower ones, so
+// overlapping paths don't shadow each other.
 func Render(s *routes.Store) (string, error) {
-	enabled := make([]routes.Route, 0, len(s.Routes))
+	var order []string
+	grouped := make(map[string][]routes.Route)
 	for _, r := range s.Routes {
-		if r.Enabled {
-			enabled = append(enabled, r)
+		if !r.Enabled {
+			continue
 		}
+		if _, ok := grouped[r.Hostname]; !ok {
+			order = append(order, r.Hostname)
+		}
+		grouped[r.Hostname] = append(grouped[r.Hostname], r)
+	}
+
+	hosts := make([]renderHost, 0, len(order))
+	for _, hostname := range order {
+		rs := grouped[hostname]
+		sort.SliceStable(rs, func(i, j int) bool {
+			return pathDepth(rs[i].Path) > pathDepth(rs[j].Path)
+		})
+
+		rh := renderHost{Hostname: hostname, Routes: make([]renderRoute, 0, len(rs))}
+		for i, r := range rs {
+			matcherName := ""
+			if r.Path != "" {
+				matcherName = fmt.Sprintf("@p%d", i)
+			}
+			rh.Routes = append(rh.Routes, renderRoute{
+				MatcherName: matcherName,
+				Path:        r.Path,
+				Upstream:    r.Upstream,
+			})
+		}
+		hosts = append(hosts, rh)
 	}
 
 	var sb strings.Builder
-	if err := parsedTpl.Execute(&sb, enabled); err != nil {
+	if err := parsedTpl.Execute(&sb, hosts); err != nil {
 		return "", err
 	}
 	return sb.String(), nil
+}
+
+// pathDepth returns the number of path segments, used to order path-scoped
+// routes from most to least specific. The catch-all (empty path) sorts last.
+func pathDepth(path string) int {
+	if path == "" {
+		return 0
+	}
+	return strings.Count(path, "/") + 1
 }

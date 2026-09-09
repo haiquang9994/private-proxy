@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 
 	"private-proxy/internal/caddyfile"
@@ -90,29 +91,44 @@ func usage() {
 	fmt.Fprint(os.Stderr, `proxyctl - manage proxied hostnames backed by Caddy
 
 Usage:
-  proxyctl add <hostname> <ip:port>      Add a new hostname -> upstream route
-  proxyctl remove <hostname>             Remove a route
-  proxyctl edit <hostname> <ip:port>     Change the upstream of an existing route
-  proxyctl enable <hostname>             Re-enable a disabled route
-  proxyctl disable <hostname>            Disable a route without deleting it
-  proxyctl list                          List all routes and their status
-  proxyctl validate                      Render and validate the Caddyfile, without applying it
-  proxyctl apply                         Validate, then apply and reload Caddy
+  proxyctl add <hostname>[/path] <ip:port>      Add a new route -> upstream
+  proxyctl remove <hostname>[/path]             Remove a route
+  proxyctl edit <hostname>[/path] <ip:port>     Change the upstream of an existing route
+  proxyctl enable <hostname>[/path]             Re-enable a disabled route
+  proxyctl disable <hostname>[/path]            Disable a route without deleting it
+  proxyctl list                                 List all routes and their status
+  proxyctl validate                             Render and validate the Caddyfile, without applying it
+  proxyctl apply                                Validate, then apply and reload Caddy
 
 Commands other than "apply" only edit routes.yaml; run "apply" to deploy the change.
+
+A hostname with no path is its own route (the catch-all for that host); a
+path route only matches that path and everything under it -- it doesn't
+affect the hostname's other routes. "remove"/"disable" on a hostname only
+removes/disables that hostname's catch-all route, not its path routes.
 `)
+}
+
+// splitHostPath splits a CLI token like "example.com" or "example.com/ws"
+// into its hostname and path parts. path is "" when the token has no "/".
+func splitHostPath(token string) (hostname, path string) {
+	if i := strings.IndexByte(token, '/'); i >= 0 {
+		return token[:i], token[i:]
+	}
+	return token, ""
 }
 
 func runAdd(root string, args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: proxyctl add <hostname> <ip:port>")
+		return fmt.Errorf("usage: proxyctl add <hostname>[/path] <ip:port>")
 	}
+	hostname, path := splitHostPath(args[0])
 	routesPath := filepath.Join(root, routesFileName)
 	s, err := routes.Load(routesPath)
 	if err != nil {
 		return err
 	}
-	if err := s.Add(args[0], args[1]); err != nil {
+	if err := s.Add(hostname, path, args[1]); err != nil {
 		return err
 	}
 	if err := routes.Save(routesPath, s); err != nil {
@@ -124,14 +140,15 @@ func runAdd(root string, args []string) error {
 
 func runRemove(root string, args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("usage: proxyctl remove <hostname>")
+		return fmt.Errorf("usage: proxyctl remove <hostname>[/path]")
 	}
+	hostname, path := splitHostPath(args[0])
 	routesPath := filepath.Join(root, routesFileName)
 	s, err := routes.Load(routesPath)
 	if err != nil {
 		return err
 	}
-	if err := s.Remove(args[0]); err != nil {
+	if err := s.Remove(hostname, path); err != nil {
 		return err
 	}
 	if err := routes.Save(routesPath, s); err != nil {
@@ -143,14 +160,15 @@ func runRemove(root string, args []string) error {
 
 func runEdit(root string, args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: proxyctl edit <hostname> <ip:port>")
+		return fmt.Errorf("usage: proxyctl edit <hostname>[/path] <ip:port>")
 	}
+	hostname, path := splitHostPath(args[0])
 	routesPath := filepath.Join(root, routesFileName)
 	s, err := routes.Load(routesPath)
 	if err != nil {
 		return err
 	}
-	if err := s.Edit(args[0], args[1]); err != nil {
+	if err := s.Edit(hostname, path, args[1]); err != nil {
 		return err
 	}
 	if err := routes.Save(routesPath, s); err != nil {
@@ -166,14 +184,15 @@ func runSetEnabled(root string, args []string, enabled bool) error {
 		if !enabled {
 			verb = "disable"
 		}
-		return fmt.Errorf("usage: proxyctl %s <hostname>", verb)
+		return fmt.Errorf("usage: proxyctl %s <hostname>[/path]", verb)
 	}
+	hostname, path := splitHostPath(args[0])
 	routesPath := filepath.Join(root, routesFileName)
 	s, err := routes.Load(routesPath)
 	if err != nil {
 		return err
 	}
-	if err := s.SetEnabled(args[0], enabled); err != nil {
+	if err := s.SetEnabled(hostname, path, enabled); err != nil {
 		return err
 	}
 	if err := routes.Save(routesPath, s); err != nil {
@@ -202,13 +221,17 @@ func runList(root string, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "HOSTNAME\tUPSTREAM\tSTATUS")
+	fmt.Fprintln(w, "HOSTNAME\tPATH\tUPSTREAM\tSTATUS")
 	for _, r := range s.Routes {
 		status := "enabled"
 		if !r.Enabled {
 			status = "disabled"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\n", r.Hostname, r.Upstream, status)
+		path := r.Path
+		if path == "" {
+			path = "-"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.Hostname, path, r.Upstream, status)
 	}
 	return w.Flush()
 }
