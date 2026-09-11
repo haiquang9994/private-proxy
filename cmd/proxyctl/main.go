@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -220,9 +221,18 @@ func runList(root string, args []string) error {
 		return nil
 	}
 
+	// Display order only: group routes by hostname so they show up next to
+	// each other, without touching s.Routes (its order can affect how Caddy
+	// matches paths on apply).
+	sorted := make([]routes.Route, len(s.Routes))
+	copy(sorted, s.Routes)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Hostname < sorted[j].Hostname
+	})
+
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "HOSTNAME\tPATH\tUPSTREAM\tSTATUS")
-	for _, r := range s.Routes {
+	for _, r := range sorted {
 		status := "enabled"
 		if !r.Enabled {
 			status = "disabled"
