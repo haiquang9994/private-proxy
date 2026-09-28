@@ -3,6 +3,7 @@ package routes
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -305,5 +306,50 @@ func TestLoadNormalizesHostnameAndRejectsCaseDuplicates(t *testing.T) {
 		"  - hostname: example.com\n    upstream: 10.0.0.6:8080\n    enabled: true\n")
 	if _, err := Load(dupPath); err == nil {
 		t.Fatal("expected duplicate error for hostnames differing only by case")
+	}
+}
+
+func TestSaveWritesHeader(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.yaml")
+	if err := Save(path, &Store{}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// An empty store must save byte-for-byte as the committed routes.yaml,
+	// so running proxyctl doesn't leave a spurious diff in the repo.
+	committed, err := os.ReadFile("../../routes.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(committed) {
+		t.Fatalf("saved file differs from committed routes.yaml:\ngot:\n%s\nwant:\n%s", got, committed)
+	}
+}
+
+func TestSaveHeaderSurvivesRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.yaml")
+	s := &Store{}
+	_ = s.Add("app.example.com", "", "10.0.0.5:8080")
+	if err := Save(path, s); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := Save(path, loaded); err != nil {
+		t.Fatalf("second Save: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(got), "# Source of truth"); n != 1 {
+		t.Fatalf("expected header exactly once after load+save, got %d:\n%s", n, got)
 	}
 }

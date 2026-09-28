@@ -91,6 +91,13 @@ func (s *Store) Validate() error {
 	return nil
 }
 
+// fileHeader is prepended on every Save, since yaml.Marshal drops the
+// comments that were in the file when it was loaded.
+const fileHeader = `# Source of truth for proxied hostnames.
+# Managed via the proxyctl CLI (add/remove/edit/enable/disable/list).
+# Run "proxyctl apply" after editing to regenerate the Caddyfile and reload Caddy.
+`
+
 // Save writes the Store back to path atomically (write to temp file, then rename).
 func Save(path string, s *Store) error {
 	data, err := yaml.Marshal(s)
@@ -98,7 +105,7 @@ func Save(path string, s *Store) error {
 		return fmt.Errorf("encode routes: %w", err)
 	}
 
-	return fsutil.AtomicWrite(path, data)
+	return fsutil.AtomicWrite(path, append([]byte(fileHeader), data...))
 }
 
 // displayName formats a hostname+path pair the way it's identified on the CLI.
