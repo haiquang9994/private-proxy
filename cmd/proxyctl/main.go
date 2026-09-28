@@ -19,7 +19,10 @@ import (
 	"private-proxy/internal/routes"
 )
 
-const routesFileName = "routes.yaml"
+const (
+	routesFileName  = "routes.yaml"
+	composeFileName = "docker-compose.yml"
+)
 
 func main() {
 	root, err := projectRoot()
@@ -71,6 +74,8 @@ func main() {
 // projectRoot resolves the project root from the location of the running
 // binary, so proxyctl behaves the same regardless of the caller's current
 // working directory. The binary is expected to live at <project_root>/bin/proxyctl.
+// It fails if the resolved directory has no docker-compose.yml, so a binary
+// run from elsewhere (e.g. `go run`) can't silently write routes.yaml there.
 func projectRoot() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -81,11 +86,14 @@ func projectRoot() (string, error) {
 		return "", fmt.Errorf("resolve proxyctl executable path: %w", err)
 	}
 
-	binDir := filepath.Dir(exe)
-	if filepath.Base(binDir) == "bin" {
-		return filepath.Dir(binDir), nil
+	root := filepath.Dir(exe)
+	if filepath.Base(root) == "bin" {
+		root = filepath.Dir(root)
 	}
-	return binDir, nil
+	if _, err := os.Stat(filepath.Join(root, composeFileName)); err != nil {
+		return "", fmt.Errorf("%s not found in %s: proxyctl must be built to <project_root>/bin/proxyctl", composeFileName, root)
+	}
+	return root, nil
 }
 
 func usage() {
@@ -119,20 +127,27 @@ func splitHostPath(token string) (hostname, path string) {
 	return token, ""
 }
 
-func runAdd(root string, args []string) error {
-	if len(args) != 2 {
-		return fmt.Errorf("usage: proxyctl add <hostname>[/path] <ip:port>")
-	}
-	hostname, path := splitHostPath(args[0])
+// mutateRoutes loads routes.yaml, applies fn to the store, and saves it back.
+func mutateRoutes(root string, fn func(s *routes.Store) error) error {
 	routesPath := filepath.Join(root, routesFileName)
 	s, err := routes.Load(routesPath)
 	if err != nil {
 		return err
 	}
-	if err := s.Add(hostname, path, args[1]); err != nil {
+	if err := fn(s); err != nil {
 		return err
 	}
-	if err := routes.Save(routesPath, s); err != nil {
+	return routes.Save(routesPath, s)
+}
+
+func runAdd(root string, args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: proxyctl add <hostname>[/path] <ip:port>")
+	}
+	hostname, path := splitHostPath(args[0])
+	if err := mutateRoutes(root, func(s *routes.Store) error {
+		return s.Add(hostname, path, args[1])
+	}); err != nil {
 		return err
 	}
 	fmt.Printf("added %s -> %s (run \"proxyctl apply\" to deploy)\n", args[0], args[1])
@@ -144,15 +159,9 @@ func runRemove(root string, args []string) error {
 		return fmt.Errorf("usage: proxyctl remove <hostname>[/path]")
 	}
 	hostname, path := splitHostPath(args[0])
-	routesPath := filepath.Join(root, routesFileName)
-	s, err := routes.Load(routesPath)
-	if err != nil {
-		return err
-	}
-	if err := s.Remove(hostname, path); err != nil {
-		return err
-	}
-	if err := routes.Save(routesPath, s); err != nil {
+	if err := mutateRoutes(root, func(s *routes.Store) error {
+		return s.Remove(hostname, path)
+	}); err != nil {
 		return err
 	}
 	fmt.Printf("removed %s (run \"proxyctl apply\" to deploy)\n", args[0])
@@ -164,15 +173,9 @@ func runEdit(root string, args []string) error {
 		return fmt.Errorf("usage: proxyctl edit <hostname>[/path] <ip:port>")
 	}
 	hostname, path := splitHostPath(args[0])
-	routesPath := filepath.Join(root, routesFileName)
-	s, err := routes.Load(routesPath)
-	if err != nil {
-		return err
-	}
-	if err := s.Edit(hostname, path, args[1]); err != nil {
-		return err
-	}
-	if err := routes.Save(routesPath, s); err != nil {
+	if err := mutateRoutes(root, func(s *routes.Store) error {
+		return s.Edit(hostname, path, args[1])
+	}); err != nil {
 		return err
 	}
 	fmt.Printf("updated %s -> %s (run \"proxyctl apply\" to deploy)\n", args[0], args[1])
@@ -188,15 +191,9 @@ func runSetEnabled(root string, args []string, enabled bool) error {
 		return fmt.Errorf("usage: proxyctl %s <hostname>[/path]", verb)
 	}
 	hostname, path := splitHostPath(args[0])
-	routesPath := filepath.Join(root, routesFileName)
-	s, err := routes.Load(routesPath)
-	if err != nil {
-		return err
-	}
-	if err := s.SetEnabled(hostname, path, enabled); err != nil {
-		return err
-	}
-	if err := routes.Save(routesPath, s); err != nil {
+	if err := mutateRoutes(root, func(s *routes.Store) error {
+		return s.SetEnabled(hostname, path, enabled)
+	}); err != nil {
 		return err
 	}
 	state := "enabled"

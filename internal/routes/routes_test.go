@@ -252,3 +252,58 @@ func TestLoadEmptyFileReturnsEmptyStore(t *testing.T) {
 		t.Fatalf("expected empty store, got %+v", s.Routes)
 	}
 }
+
+func TestAddNormalizesHostnameCase(t *testing.T) {
+	s := &Store{}
+	if err := s.Add("App.Example.COM", "", "10.0.0.5:8080"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if got := s.Routes[0].Hostname; got != "app.example.com" {
+		t.Fatalf("expected lowercased hostname, got %q", got)
+	}
+	if err := s.Add("app.example.com", "", "10.0.0.6:8080"); err == nil {
+		t.Fatal("expected duplicate error for same hostname in different case")
+	}
+}
+
+func TestAddRejectsPathDifferingOnlyByCase(t *testing.T) {
+	s := &Store{}
+	if err := s.Add("example.com", "/ws", "10.0.0.5:6001"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := s.Add("example.com", "/WS", "10.0.0.5:6002"); err == nil {
+		t.Fatal("expected duplicate error for path differing only by case")
+	}
+}
+
+func TestFindAndRemoveIgnoreCase(t *testing.T) {
+	s := &Store{}
+	_ = s.Add("example.com", "/ws", "10.0.0.5:6001")
+	if _, ok := s.Find("EXAMPLE.com", "/WS"); !ok {
+		t.Fatal("expected case-insensitive Find to match")
+	}
+	if err := s.Remove("Example.com", "/Ws"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if len(s.Routes) != 0 {
+		t.Fatalf("expected route removed, got %+v", s.Routes)
+	}
+}
+
+func TestLoadNormalizesHostnameAndRejectsCaseDuplicates(t *testing.T) {
+	path := writeRoutesFile(t, "routes:\n  - hostname: App.Example.com\n    upstream: 10.0.0.5:8080\n    enabled: true\n")
+	s, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := s.Routes[0].Hostname; got != "app.example.com" {
+		t.Fatalf("expected lowercased hostname, got %q", got)
+	}
+
+	dupPath := writeRoutesFile(t, "routes:\n"+
+		"  - hostname: Example.com\n    upstream: 10.0.0.5:8080\n    enabled: true\n"+
+		"  - hostname: example.com\n    upstream: 10.0.0.6:8080\n    enabled: true\n")
+	if _, err := Load(dupPath); err == nil {
+		t.Fatal("expected duplicate error for hostnames differing only by case")
+	}
+}

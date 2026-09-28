@@ -36,8 +36,8 @@ func TestRenderEmptyStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if strings.TrimSpace(out) != "" {
-		t.Fatalf("expected empty output, got:\n%s", out)
+	if out != header {
+		t.Fatalf("expected only the header, got:\n%s", out)
 	}
 }
 

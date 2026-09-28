@@ -9,11 +9,13 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"private-proxy/internal/fsutil"
 )
 
 var hostnameRE = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
@@ -54,6 +56,11 @@ func Load(path string) (*Store, error) {
 	if err := dec.Decode(&s); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// Hostnames are case-insensitive; normalize so "Example.com" and
+	// "example.com" can't render as two conflicting Caddy site blocks.
+	for i := range s.Routes {
+		s.Routes[i].Hostname = strings.ToLower(s.Routes[i].Hostname)
+	}
 	if err := s.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid %s: %w", path, err)
 	}
@@ -75,9 +82,9 @@ func (s *Store) Validate() error {
 		if err := ValidateUpstream(r.Upstream); err != nil {
 			return fmt.Errorf("route #%d: %w", i+1, err)
 		}
-		key := displayName(r.Hostname, r.Path)
+		key := routeKey(r.Hostname, r.Path)
 		if seen[key] {
-			return fmt.Errorf("route #%d: duplicate route %q", i+1, key)
+			return fmt.Errorf("route #%d: duplicate route %q", i+1, displayName(r.Hostname, r.Path))
 		}
 		seen[key] = true
 	}
@@ -91,25 +98,7 @@ func Save(path string, s *Store) error {
 		return fmt.Errorf("encode routes: %w", err)
 	}
 
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".routes-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("replace %s: %w", path, err)
-	}
-	return nil
+	return fsutil.AtomicWrite(path, data)
 }
 
 // displayName formats a hostname+path pair the way it's identified on the CLI.
@@ -117,12 +106,28 @@ func displayName(hostname, path string) string {
 	return hostname + path
 }
 
+// routeKey identifies a route case-insensitively: DNS hostnames are
+// case-insensitive, and so is Caddy's path matcher, so "/WS" and "/ws"
+// would match the same requests.
+func routeKey(hostname, path string) string {
+	return strings.ToLower(hostname + path)
+}
+
+// indexOf returns the index of the route matching hostname and path, or -1.
+func (s *Store) indexOf(hostname, path string) int {
+	key := routeKey(hostname, path)
+	for i := range s.Routes {
+		if routeKey(s.Routes[i].Hostname, s.Routes[i].Path) == key {
+			return i
+		}
+	}
+	return -1
+}
+
 // Find returns the route with the given hostname and path, if present.
 func (s *Store) Find(hostname, path string) (*Route, bool) {
-	for i := range s.Routes {
-		if s.Routes[i].Hostname == hostname && s.Routes[i].Path == path {
-			return &s.Routes[i], true
-		}
+	if i := s.indexOf(hostname, path); i >= 0 {
+		return &s.Routes[i], true
 	}
 	return nil, false
 }
@@ -142,19 +147,18 @@ func (s *Store) Add(hostname, path, upstream string) error {
 	if _, ok := s.Find(hostname, path); ok {
 		return fmt.Errorf("route %q already exists", displayName(hostname, path))
 	}
-	s.Routes = append(s.Routes, Route{Hostname: hostname, Path: path, Upstream: upstream, Enabled: true})
+	s.Routes = append(s.Routes, Route{Hostname: strings.ToLower(hostname), Path: path, Upstream: upstream, Enabled: true})
 	return nil
 }
 
 // Remove deletes the route with the given hostname and path. It fails if not found.
 func (s *Store) Remove(hostname, path string) error {
-	for i := range s.Routes {
-		if s.Routes[i].Hostname == hostname && s.Routes[i].Path == path {
-			s.Routes = append(s.Routes[:i], s.Routes[i+1:]...)
-			return nil
-		}
+	i := s.indexOf(hostname, path)
+	if i < 0 {
+		return fmt.Errorf("route %q not found", displayName(hostname, path))
 	}
-	return fmt.Errorf("route %q not found", displayName(hostname, path))
+	s.Routes = append(s.Routes[:i], s.Routes[i+1:]...)
+	return nil
 }
 
 // Edit updates the upstream of an existing route. It fails if not found or upstream is invalid.

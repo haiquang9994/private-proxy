@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"private-proxy/internal/fsutil"
 )
 
 const (
@@ -20,42 +22,27 @@ const (
 	containerRoot    = "/srv"
 )
 
-// WriteNewCaddyfile atomically writes content to <root>/Caddyfile.new.
-func WriteNewCaddyfile(root, content string) error {
-	return atomicWrite(root, filepath.Join(root, CaddyfileNewName), content)
+// runCaddy runs `caddy <args...>` inside the running container, with root
+// as the working directory so docker compose finds the right
+// docker-compose.yml. It is a variable so tests can stub out Docker.
+var runCaddy = func(root string, args ...string) ([]byte, error) {
+	cmdArgs := append([]string{"compose", "exec", "-T", containerService, "caddy"}, args...)
+	cmd := exec.Command("docker", cmdArgs...)
+	cmd.Dir = root
+	return cmd.CombinedOutput()
 }
 
-func atomicWrite(root, path, content string) error {
-	tmp, err := os.CreateTemp(root, ".caddyfile-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-
-	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("replace %s: %w", path, err)
-	}
-	return nil
+// WriteNewCaddyfile atomically writes content to <root>/Caddyfile.new.
+func WriteNewCaddyfile(root, content string) error {
+	return fsutil.AtomicWrite(filepath.Join(root, CaddyfileNewName), []byte(content))
 }
 
 // Validate runs `caddy validate` inside the running container against
 // <root>/Caddyfile.new (visible inside the container at /srv/Caddyfile.new,
 // since docker-compose.yml mounts root at /srv). It does not modify the
-// live Caddyfile. The docker compose command is run with root as its
-// working directory so it finds the right docker-compose.yml.
+// live Caddyfile.
 func Validate(root string) error {
-	cmd := exec.Command("docker", "compose", "exec", "-T", containerService,
-		"caddy", "validate", "--config", containerRoot+"/"+CaddyfileNewName, "--adapter", "caddyfile")
-	cmd.Dir = root
-	out, err := cmd.CombinedOutput()
+	out, err := runCaddy(root, "validate", "--config", containerRoot+"/"+CaddyfileNewName, "--adapter", "caddyfile")
 	if err != nil {
 		return fmt.Errorf("caddy validate failed: %w\n%s", err, out)
 	}
@@ -74,7 +61,7 @@ func Reload(root string) error {
 	prev, err := os.ReadFile(caddyfilePath)
 	hadPrev := err == nil
 	if hadPrev {
-		if err := atomicWrite(root, bakPath, string(prev)); err != nil {
+		if err := fsutil.AtomicWrite(bakPath, prev); err != nil {
 			return fmt.Errorf("backup current Caddyfile: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
@@ -85,16 +72,13 @@ func Reload(root string) error {
 		return fmt.Errorf("promote Caddyfile.new: %w", err)
 	}
 
-	cmd := exec.Command("docker", "compose", "exec", "-T", containerService,
-		"caddy", "reload", "--config", containerRoot+"/"+CaddyfileName, "--adapter", "caddyfile")
-	cmd.Dir = root
-	out, err := cmd.CombinedOutput()
+	out, err := runCaddy(root, "reload", "--config", containerRoot+"/"+CaddyfileName, "--adapter", "caddyfile")
 	if err != nil {
 		reloadErr := fmt.Errorf("caddy reload failed: %w\n%s", err, out)
 		// Caddy is still running the previous config, so put the previous
 		// Caddyfile back; otherwise the next container restart would load
 		// the config that just failed to apply.
-		if rbErr := restoreCaddyfile(root, caddyfilePath, prev, hadPrev); rbErr != nil {
+		if rbErr := restoreCaddyfile(caddyfilePath, prev, hadPrev); rbErr != nil {
 			return fmt.Errorf("%w\nrollback of %s also failed: %v", reloadErr, CaddyfileName, rbErr)
 		}
 		return fmt.Errorf("%w\n%s was rolled back to the previous version", reloadErr, CaddyfileName)
@@ -104,12 +88,12 @@ func Reload(root string) error {
 
 // restoreCaddyfile puts back the Caddyfile that was live before Reload
 // promoted Caddyfile.new, or removes it if there was none.
-func restoreCaddyfile(root, caddyfilePath string, prev []byte, hadPrev bool) error {
+func restoreCaddyfile(caddyfilePath string, prev []byte, hadPrev bool) error {
 	if !hadPrev {
 		if err := os.Remove(caddyfilePath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		return nil
 	}
-	return atomicWrite(root, caddyfilePath, string(prev))
+	return fsutil.AtomicWrite(caddyfilePath, prev)
 }
