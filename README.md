@@ -64,7 +64,25 @@ proxyctl disable <hostname>[/path]            Disable a route without deleting i
 proxyctl list                                 List all routes and their status
 proxyctl validate                             Render and validate the Caddyfile, without applying it
 proxyctl apply                                Validate, then apply and reload Caddy
+proxyctl completion bash|zsh                  Print the shell tab-completion script
 ```
+
+### Tab completion
+
+Add one line to your shell's rc file, then open a new shell:
+
+```bash
+# ~/.bashrc
+source <(proxyctl completion bash)
+
+# ~/.zshrc
+source <(proxyctl completion zsh)
+```
+
+Tab then completes command names, existing routes for `remove`/`edit`, only
+disabled routes for `enable`, only enabled routes for `disable`, and the
+current upstream as the second argument of `edit`. Suggestions are read live
+from `routes.yaml`, so they always match what's configured.
 
 `add`, `remove`, `edit`, `enable`, and `disable` only edit `routes.yaml`.
 Nothing is deployed until you run `proxyctl apply`, which regenerates the

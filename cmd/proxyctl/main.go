@@ -73,6 +73,10 @@ func main() {
 		run = func() error { return runValidate(ctx, root, args) }
 	case "apply":
 		run = func() error { return runApply(ctx, root, args) }
+	case "completion":
+		err = runCompletion(args)
+	case completeCommand:
+		err = runComplete(root, args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -140,6 +144,7 @@ Usage:
   proxyctl list                                 List all routes and their status
   proxyctl validate                             Render and validate the Caddyfile, without applying it
   proxyctl apply                                Validate, then apply and reload Caddy
+  proxyctl completion bash|zsh                  Print the shell tab-completion script
 
 Commands other than "apply" only edit routes.yaml; run "apply" to deploy the change.
 
