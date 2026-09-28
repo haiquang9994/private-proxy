@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -179,6 +180,71 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 func TestLoadMissingFileReturnsEmptyStore(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Load(filepath.Join(dir, "does-not-exist.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(s.Routes) != 0 {
+		t.Fatalf("expected empty store, got %+v", s.Routes)
+	}
+}
+
+func TestAddRejectsUpstreamInjection(t *testing.T) {
+	s := &Store{}
+	for _, upstream := range []string{
+		"a b:80",
+		"x {\n}\nevil.com {\n}\ny:80",
+		"host{:80",
+	} {
+		if err := s.Add("app.example.com", "", upstream); err == nil {
+			t.Fatalf("expected error for upstream %q", upstream)
+		}
+	}
+}
+
+func TestAddAcceptsHostnameAndIPv6Upstreams(t *testing.T) {
+	s := &Store{}
+	if err := s.Add("a.example.com", "", "backend.internal:8080"); err != nil {
+		t.Fatalf("hostname upstream: %v", err)
+	}
+	if err := s.Add("b.example.com", "", "[::1]:8080"); err != nil {
+		t.Fatalf("IPv6 upstream: %v", err)
+	}
+}
+
+func writeRoutesFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "routes.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadRejectsUnknownField(t *testing.T) {
+	path := writeRoutesFile(t, "routes:\n  - hostname: app.example.com\n    upstream: 10.0.0.5:8080\n    enable: true\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for unknown field \"enable\"")
+	}
+}
+
+func TestLoadRejectsInvalidRoute(t *testing.T) {
+	path := writeRoutesFile(t, "routes:\n  - hostname: app.example.com\n    upstream: \"x {:80\"\n    enabled: true\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for invalid upstream")
+	}
+}
+
+func TestLoadRejectsDuplicateRoute(t *testing.T) {
+	path := writeRoutesFile(t, "routes:\n"+
+		"  - hostname: app.example.com\n    upstream: 10.0.0.5:8080\n    enabled: true\n"+
+		"  - hostname: app.example.com\n    upstream: 10.0.0.6:8080\n    enabled: true\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for duplicate route")
+	}
+}
+
+func TestLoadEmptyFileReturnsEmptyStore(t *testing.T) {
+	s, err := Load(writeRoutesFile(t, ""))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

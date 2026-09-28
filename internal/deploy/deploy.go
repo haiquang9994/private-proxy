@@ -64,14 +64,17 @@ func Validate(root string) error {
 
 // Reload backs up the live Caddyfile to Caddyfile.bak, promotes Caddyfile.new
 // to Caddyfile, and tells the running container to reload with zero downtime.
-// The caller is expected to have already validated Caddyfile.new.
+// The caller is expected to have already validated Caddyfile.new. If the
+// reload fails, the previous Caddyfile is restored.
 func Reload(root string) error {
 	caddyfilePath := filepath.Join(root, CaddyfileName)
 	newPath := filepath.Join(root, CaddyfileNewName)
 	bakPath := filepath.Join(root, CaddyfileBakName)
 
-	if data, err := os.ReadFile(caddyfilePath); err == nil {
-		if err := atomicWrite(root, bakPath, string(data)); err != nil {
+	prev, err := os.ReadFile(caddyfilePath)
+	hadPrev := err == nil
+	if hadPrev {
+		if err := atomicWrite(root, bakPath, string(prev)); err != nil {
 			return fmt.Errorf("backup current Caddyfile: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
@@ -87,7 +90,26 @@ func Reload(root string) error {
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("caddy reload failed: %w\n%s", err, out)
+		reloadErr := fmt.Errorf("caddy reload failed: %w\n%s", err, out)
+		// Caddy is still running the previous config, so put the previous
+		// Caddyfile back; otherwise the next container restart would load
+		// the config that just failed to apply.
+		if rbErr := restoreCaddyfile(root, caddyfilePath, prev, hadPrev); rbErr != nil {
+			return fmt.Errorf("%w\nrollback of %s also failed: %v", reloadErr, CaddyfileName, rbErr)
+		}
+		return fmt.Errorf("%w\n%s was rolled back to the previous version", reloadErr, CaddyfileName)
 	}
 	return nil
+}
+
+// restoreCaddyfile puts back the Caddyfile that was live before Reload
+// promoted Caddyfile.new, or removes it if there was none.
+func restoreCaddyfile(root, caddyfilePath string, prev []byte, hadPrev bool) error {
+	if !hadPrev {
+		if err := os.Remove(caddyfilePath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	return atomicWrite(root, caddyfilePath, string(prev))
 }

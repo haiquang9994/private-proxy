@@ -3,7 +3,10 @@
 package routes
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -44,11 +47,41 @@ func Load(path string) (*Store, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
+	// KnownFields rejects typos like "enable:" instead of silently dropping them.
 	var s Store
-	if err := yaml.Unmarshal(data, &s); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&s); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if err := s.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", path, err)
+	}
 	return &s, nil
+}
+
+// Validate checks every route with the same rules Add enforces, and rejects
+// duplicate (hostname, path) pairs, so a hand-edited routes.yaml can't feed
+// unchecked values into the Caddyfile.
+func (s *Store) Validate() error {
+	seen := make(map[string]bool, len(s.Routes))
+	for i, r := range s.Routes {
+		if err := ValidateHostname(r.Hostname); err != nil {
+			return fmt.Errorf("route #%d: %w", i+1, err)
+		}
+		if err := ValidatePath(r.Path); err != nil {
+			return fmt.Errorf("route #%d: %w", i+1, err)
+		}
+		if err := ValidateUpstream(r.Upstream); err != nil {
+			return fmt.Errorf("route #%d: %w", i+1, err)
+		}
+		key := displayName(r.Hostname, r.Path)
+		if seen[key] {
+			return fmt.Errorf("route #%d: duplicate route %q", i+1, key)
+		}
+		seen[key] = true
+	}
+	return nil
 }
 
 // Save writes the Store back to path atomically (write to temp file, then rename).
@@ -175,6 +208,12 @@ func ValidateUpstream(upstream string) error {
 	}
 	if host == "" {
 		return fmt.Errorf("invalid upstream %q: missing host", upstream)
+	}
+	// The host is rendered verbatim into the Caddyfile, so it must be a plain
+	// IP or hostname -- anything else (spaces, braces, newlines) could inject
+	// extra Caddyfile directives.
+	if net.ParseIP(host) == nil && !hostnameRE.MatchString(host) {
+		return fmt.Errorf("invalid upstream %q: host must be an IP address or hostname", upstream)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
