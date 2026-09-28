@@ -13,15 +13,22 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"private-proxy/internal/caddyfile"
 	"private-proxy/internal/deploy"
+	"private-proxy/internal/filelock"
 	"private-proxy/internal/routes"
 )
 
 const (
 	routesFileName  = "routes.yaml"
 	composeFileName = "docker-compose.yml"
+	lockFileName    = ".proxyctl.lock"
+
+	// lockTimeout bounds how long a command waits for another proxyctl
+	// (e.g. a slow `apply`) to finish before giving up.
+	lockTimeout = 30 * time.Second
 )
 
 func main() {
@@ -39,23 +46,25 @@ func main() {
 	cmd := os.Args[1]
 	args := os.Args[2:]
 
+	var run func() error
 	switch cmd {
 	case "add":
-		err = runAdd(root, args)
+		run = func() error { return runAdd(root, args) }
 	case "remove":
-		err = runRemove(root, args)
+		run = func() error { return runRemove(root, args) }
 	case "edit":
-		err = runEdit(root, args)
+		run = func() error { return runEdit(root, args) }
 	case "enable":
-		err = runSetEnabled(root, args, true)
+		run = func() error { return runSetEnabled(root, args, true) }
 	case "disable":
-		err = runSetEnabled(root, args, false)
+		run = func() error { return runSetEnabled(root, args, false) }
 	case "list":
+		// Read-only, and routes.yaml is replaced atomically, so no lock needed.
 		err = runList(root, args)
 	case "validate":
-		err = runValidate(root, args)
+		run = func() error { return runValidate(root, args) }
 	case "apply":
-		err = runApply(root, args)
+		run = func() error { return runApply(root, args) }
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -65,10 +74,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	if run != nil {
+		err = withLock(root, run)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// withLock runs fn while holding the project-wide lock, so concurrent
+// proxyctl invocations can't lose each other's routes.yaml edits or
+// overwrite each other's Caddyfile.new mid-apply.
+func withLock(root string, fn func() error) error {
+	lock, err := filelock.Acquire(filepath.Join(root, lockFileName), lockTimeout)
+	if err != nil {
+		return fmt.Errorf("%w: is another proxyctl command still running?", err)
+	}
+	defer lock.Release()
+	return fn()
 }
 
 // projectRoot resolves the project root from the location of the running
