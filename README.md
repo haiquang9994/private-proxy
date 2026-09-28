@@ -16,6 +16,19 @@ above -- at startup it resolves the project root from its own binary path
 (parent of the `bin/` directory it lives in), so it works correctly even when
 invoked from another directory or with `bin/` added to `PATH`.
 
+Caddy's admin API listens on a unix socket inside the container
+(`CADDY_ADMIN` in `docker-compose.yml`), not on `localhost:2019`: with host
+networking, a TCP admin port would let any local process on the server
+rewrite the proxy config. `proxyctl` reaches it through `docker compose exec`,
+so nothing else needs configuring.
+
+When upgrading an existing server to this setup, recreate the container once
+so it picks up the new environment (`docker compose restart` is not enough):
+
+```
+docker compose up -d
+```
+
 ## Building locally and deploying to the server
 
 The server runs Linux, so if you build on a different OS you need to

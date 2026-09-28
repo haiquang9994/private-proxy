@@ -7,6 +7,17 @@ services:
     # not just other containers on a shared Docker network. This also means
     # Caddy binds 80/443 directly on the host, so no `ports:` mapping here.
     network_mode: host
+    # With host networking, Caddy's default admin API (localhost:2019, no
+    # auth) would listen on the host's own loopback, letting any local
+    # process replace the proxy config. Move it to a unix socket that only
+    # exists inside the container. `caddy reload` run via `docker compose
+    # exec` inherits this env var, so proxyctl keeps working unchanged.
+    environment:
+      CADDY_ADMIN: unix//run/caddy/admin.sock
+    # Fresh tmpfs on every container start, so a stale socket left by an
+    # unclean shutdown can never block the admin listener from binding.
+    tmpfs:
+      - /run/caddy
     # The whole project root is mounted read-only at /srv so that both the
     # live Caddyfile and a candidate Caddyfile.new (used by `proxyctl validate`)
     # are visible inside the container without changing this file per deploy.
