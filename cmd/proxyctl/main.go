@@ -7,11 +7,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -43,6 +46,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Ctrl+C / SIGTERM cancel ctx instead of killing proxyctl outright, so
+	// an interrupted apply still rolls back the Caddyfile and releases the lock.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	cmd := os.Args[1]
 	args := os.Args[2:]
 
@@ -62,9 +70,9 @@ func main() {
 		// Read-only, and routes.yaml is replaced atomically, so no lock needed.
 		err = runList(root, args)
 	case "validate":
-		run = func() error { return runValidate(root, args) }
+		run = func() error { return runValidate(ctx, root, args) }
 	case "apply":
-		run = func() error { return runApply(root, args) }
+		run = func() error { return runApply(ctx, root, args) }
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -75,7 +83,7 @@ func main() {
 	}
 
 	if run != nil {
-		err = withLock(root, run)
+		err = withLock(ctx, root, run)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -86,8 +94,8 @@ func main() {
 // withLock runs fn while holding the project-wide lock, so concurrent
 // proxyctl invocations can't lose each other's routes.yaml edits or
 // overwrite each other's Caddyfile.new mid-apply.
-func withLock(root string, fn func() error) error {
-	lock, err := filelock.Acquire(filepath.Join(root, lockFileName), lockTimeout)
+func withLock(ctx context.Context, root string, fn func() error) error {
+	lock, err := filelock.Acquire(ctx, filepath.Join(root, lockFileName), lockTimeout)
 	if err != nil {
 		return fmt.Errorf("%w: is another proxyctl command still running?", err)
 	}
@@ -267,7 +275,7 @@ func runList(root string, args []string) error {
 	return w.Flush()
 }
 
-func runValidate(root string, args []string) error {
+func runValidate(ctx context.Context, root string, args []string) error {
 	if len(args) != 0 {
 		return fmt.Errorf("usage: proxyctl validate")
 	}
@@ -283,21 +291,21 @@ func runValidate(root string, args []string) error {
 	if err := deploy.WriteNewCaddyfile(root, content); err != nil {
 		return err
 	}
-	if err := deploy.Validate(root); err != nil {
+	if err := deploy.Validate(ctx, root); err != nil {
 		return err
 	}
 	fmt.Println("Caddyfile is valid")
 	return nil
 }
 
-func runApply(root string, args []string) error {
+func runApply(ctx context.Context, root string, args []string) error {
 	if len(args) != 0 {
 		return fmt.Errorf("usage: proxyctl apply")
 	}
-	if err := runValidate(root, nil); err != nil {
+	if err := runValidate(ctx, root, nil); err != nil {
 		return err
 	}
-	if err := deploy.Reload(root); err != nil {
+	if err := deploy.Reload(ctx, root); err != nil {
 		return err
 	}
 	fmt.Println("applied and reloaded Caddy")

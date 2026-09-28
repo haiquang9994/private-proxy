@@ -4,6 +4,7 @@
 package filelock
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -22,8 +23,8 @@ type Lock struct {
 }
 
 // Acquire takes an exclusive lock on path (creating the file if needed),
-// retrying until timeout if another process holds it.
-func Acquire(path string, timeout time.Duration) (*Lock, error) {
+// retrying until timeout or until ctx is done if another process holds it.
+func Acquire(ctx context.Context, path string, timeout time.Duration) (*Lock, error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open lock file: %w", err)
@@ -43,7 +44,12 @@ func Acquire(path string, timeout time.Duration) (*Lock, error) {
 			f.Close()
 			return nil, fmt.Errorf("lock %s: %w (waited %s)", path, errBusy, timeout)
 		}
-		time.Sleep(retryInterval)
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, fmt.Errorf("lock %s: %w", path, ctx.Err())
+		case <-time.After(retryInterval):
+		}
 	}
 }
 
