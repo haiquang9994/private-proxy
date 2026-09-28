@@ -1,7 +1,11 @@
 package main
 
 import (
+	"io"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"private-proxy/internal/routes"
@@ -24,6 +28,7 @@ func TestCompletions(t *testing.T) {
 	}{
 		{"all commands", []string{""}, commandNames},
 		{"command prefix", []string{"e"}, []string{"edit", "enable"}},
+		{"init and version are commands", []string{"v"}, []string{"validate", "version"}},
 		{"remove offers all routes", []string{"remove", ""}, []string{"app.example.com", "example.com", "example.com/ws"}},
 		{"route prefix", []string{"edit", "example.com/"}, []string{"example.com/ws"}},
 		{"enable offers disabled routes", []string{"enable", ""}, []string{"example.com/ws"}},
@@ -60,4 +65,36 @@ func TestShellQuote(t *testing.T) {
 	if got, want := shellQuote(`/opt/it's/proxyctl`), `'/opt/it'\''s/proxyctl'`; got != want {
 		t.Fatalf("shellQuote = %s, want %s", got, want)
 	}
+}
+
+func TestRunCompleteWithoutRoutesFile(t *testing.T) {
+	for _, root := range []string{"", filepath.Join(t.TempDir(), "missing")} {
+		out := captureStdout(t, func() {
+			if err := runComplete(root, []string{"li"}); err != nil {
+				t.Fatalf("runComplete(%q): %v", root, err)
+			}
+		})
+		if out != "list\n" {
+			t.Fatalf("runComplete(%q) printed %q, want %q", root, out, "list\n")
+		}
+	}
+}
+
+// captureStdout returns what fn writes to os.Stdout.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+	fn()
+	w.Close()
+	var b strings.Builder
+	if _, err := io.Copy(&b, r); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
 }
