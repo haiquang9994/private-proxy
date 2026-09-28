@@ -1,9 +1,9 @@
 // Command proxyctl manages the proxied hostnames declared in routes.yaml
 // and drives Caddy (running in Docker Compose) to apply them.
 //
-// It can be invoked from any working directory (e.g. with its bin/
-// directory added to PATH): the project root is always resolved from the
-// location of the binary itself, which must live at <project_root>/bin/proxyctl.
+// Its project root (routes.yaml, Caddyfile, docker-compose.yml) is
+// $PROXYCTL_ROOT if set, else the directory of a repo clone the binary was
+// built into (<root>/bin/proxyctl), else /opt/private-proxy.
 package main
 
 import (
@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -34,61 +35,90 @@ const (
 	lockTimeout = 30 * time.Second
 )
 
-func main() {
-	root, err := projectRoot()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
+// version is stamped at release build time via -ldflags "-X main.version=...".
+var version = "dev"
 
+// projectCommands need root privileges and, except init, an initialized
+// project root.
+var projectCommands = []string{
+	"init", "add", "remove", "edit", "enable", "disable", "list", "validate", "apply",
+}
+
+func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(1)
 	}
+	cmd := os.Args[1]
+	args := os.Args[2:]
+
+	// These work without root privileges or an initialized project root.
+	switch cmd {
+	case "help", "-h", "--help":
+		usage()
+		return
+	case "version":
+		fmt.Println(version)
+		return
+	case "completion":
+		exitOnError(runCompletion(args))
+		return
+	case completeCommand:
+		// Best effort: an unresolvable root only means no route suggestions.
+		root, _ := currentRoot()
+		exitOnError(runComplete(root, args))
+		return
+	}
+
+	if !slices.Contains(projectCommands, cmd) {
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
+		usage()
+		os.Exit(1)
+	}
+	exitOnError(requireRoot())
 
 	// Ctrl+C / SIGTERM cancel ctx instead of killing proxyctl outright, so
 	// an interrupted apply still rolls back the Caddyfile and releases the lock.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cmd := os.Args[1]
-	args := os.Args[2:]
+	if cmd == "init" {
+		root, err := currentRoot()
+		exitOnError(err)
+		exitOnError(runInit(ctx, root, args))
+		return
+	}
+	root, err := projectRoot()
+	exitOnError(err)
+	exitOnError(runProjectCommand(ctx, root, cmd, args))
+}
 
-	var run func() error
+// runProjectCommand runs a command against an initialized project root.
+func runProjectCommand(ctx context.Context, root, cmd string, args []string) error {
 	switch cmd {
 	case "add":
-		run = func() error { return runAdd(root, args) }
+		return withLock(ctx, root, func() error { return runAdd(root, args) })
 	case "remove":
-		run = func() error { return runRemove(root, args) }
+		return withLock(ctx, root, func() error { return runRemove(root, args) })
 	case "edit":
-		run = func() error { return runEdit(root, args) }
+		return withLock(ctx, root, func() error { return runEdit(root, args) })
 	case "enable":
-		run = func() error { return runSetEnabled(root, args, true) }
+		return withLock(ctx, root, func() error { return runSetEnabled(root, args, true) })
 	case "disable":
-		run = func() error { return runSetEnabled(root, args, false) }
+		return withLock(ctx, root, func() error { return runSetEnabled(root, args, false) })
 	case "list":
 		// Read-only, and routes.yaml is replaced atomically, so no lock needed.
-		err = runList(root, args)
+		return runList(root, args)
 	case "validate":
-		run = func() error { return runValidate(ctx, root, args) }
+		return withLock(ctx, root, func() error { return runValidate(ctx, root, args) })
 	case "apply":
-		run = func() error { return runApply(ctx, root, args) }
-	case "completion":
-		err = runCompletion(args)
-	case completeCommand:
-		err = runComplete(root, args)
-	case "help", "-h", "--help":
-		usage()
-		return
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
-		usage()
-		os.Exit(1)
+		return withLock(ctx, root, func() error { return runApply(ctx, root, args) })
 	}
+	return fmt.Errorf("unknown command %q", cmd)
+}
 
-	if run != nil {
-		err = withLock(ctx, root, run)
-	}
+// exitOnError prints err and exits with status 1 if err is non-nil.
+func exitOnError(err error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -107,35 +137,11 @@ func withLock(ctx context.Context, root string, fn func() error) error {
 	return fn()
 }
 
-// projectRoot resolves the project root from the location of the running
-// binary, so proxyctl behaves the same regardless of the caller's current
-// working directory. The binary is expected to live at <project_root>/bin/proxyctl.
-// It fails if the resolved directory has no docker-compose.yml, so a binary
-// run from elsewhere (e.g. `go run`) can't silently write routes.yaml there.
-func projectRoot() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("locate proxyctl executable: %w", err)
-	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return "", fmt.Errorf("resolve proxyctl executable path: %w", err)
-	}
-
-	root := filepath.Dir(exe)
-	if filepath.Base(root) == "bin" {
-		root = filepath.Dir(root)
-	}
-	if _, err := os.Stat(filepath.Join(root, composeFileName)); err != nil {
-		return "", fmt.Errorf("%s not found in %s: proxyctl must be built to <project_root>/bin/proxyctl", composeFileName, root)
-	}
-	return root, nil
-}
-
 func usage() {
 	fmt.Fprint(os.Stderr, `proxyctl - manage proxied hostnames backed by Caddy
 
 Usage:
+  proxyctl init                                 Create the project root and its files
   proxyctl add <hostname>[/path] <ip:port>      Add a new route -> upstream
   proxyctl remove <hostname>[/path]             Remove a route
   proxyctl edit <hostname>[/path] <ip:port>     Change the upstream of an existing route
@@ -145,8 +151,13 @@ Usage:
   proxyctl validate                             Render and validate the Caddyfile, without applying it
   proxyctl apply                                Validate, then apply and reload Caddy
   proxyctl completion bash|zsh                  Print the shell tab-completion script
+  proxyctl version                              Print the proxyctl version
 
 Commands other than "apply" only edit routes.yaml; run "apply" to deploy the change.
+Every command except help, version and completion must be run as root.
+
+The project root is $PROXYCTL_ROOT if set, else /opt/private-proxy
+(or the repo clone proxyctl was built in).
 
 A hostname with no path is its own route (the catch-all for that host); a
 path route only matches that path and everything under it -- it doesn't

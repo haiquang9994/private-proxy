@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,24 +15,28 @@ const completeCommand = "__complete"
 
 // commandNames are the subcommands offered when completing the first word.
 var commandNames = []string{
-	"add", "remove", "edit", "enable", "disable",
-	"list", "validate", "apply", "completion", "help",
+	"init", "add", "remove", "edit", "enable", "disable",
+	"list", "validate", "apply", "completion", "version", "help",
 }
 
 var completionShells = []string{"bash", "zsh"}
 
 // runComplete prints one suggestion per line for the command line given in
 // args: every word typed after "proxyctl", the last one being the (possibly
-// empty) word being completed. It never fails loudly, so a broken
-// routes.yaml only loses route suggestions instead of spamming the prompt.
+// empty) word being completed. It never fails loudly, so a missing or
+// unreadable routes.yaml (before init, or as a non-root user) only loses
+// route suggestions instead of spamming the prompt. root may be "" when it
+// couldn't be resolved.
 func runComplete(root string, args []string) error {
 	if len(args) == 0 {
 		args = []string{""}
 	}
 	// Read-only, like list, so no lock needed.
-	s, err := routes.Load(filepath.Join(root, routesFileName))
-	if err != nil {
-		s = nil
+	var s *routes.Store
+	if root != "" {
+		if loaded, err := routes.Load(filepath.Join(root, routesFileName)); err == nil {
+			s = loaded
+		}
 	}
 	for _, c := range completions(s, args) {
 		fmt.Println(c)
@@ -98,12 +101,9 @@ func runCompletion(args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("usage: proxyctl completion bash|zsh")
 	}
-	exe, err := os.Executable()
+	exe, err := executablePath()
 	if err != nil {
-		return fmt.Errorf("locate proxyctl executable: %w", err)
-	}
-	if exe, err = filepath.EvalSymlinks(exe); err != nil {
-		return fmt.Errorf("resolve proxyctl executable path: %w", err)
+		return err
 	}
 
 	// The scripts call the binary by its absolute path, so completion keeps

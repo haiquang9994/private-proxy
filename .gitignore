@@ -2,3 +2,5 @@
 /Caddyfile.new
 /Caddyfile.bak
 /.proxyctl.lock
+/docs/plans/
+/dist/
